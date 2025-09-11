@@ -1,0 +1,123 @@
+# pip install python-docx
+import re
+from docx import Document
+
+# ===== 配置：键为尖括号里的内容（不含尖括号） =====
+REPLACEMENTS = {
+    "Location": "SL",
+    "Voltage": "345",
+    "Element with Type": "BKR1223 (Circuit Breaker)",
+    "Element": "BKR1223",
+}
+# ==============================================
+
+ANGLE_TAG = re.compile(r"<([^<>]+)>")  # 只匹配 <...>；不会影响 [...]
+
+def replace_in_paragraph_preserve_format(p):
+    """在段落内替换 <...>，新文本继承占位符起始 run 的格式，不改其它文字"""
+    if not p.runs:
+        return
+
+    run_idx = 0
+    pos_in_run = 0
+    inside = False
+    tag_start = None      # (run_idx, pos_in_run)
+    tag_buf = []
+
+    def collapse_replace(start, end, replacement):
+        """
+        把从 start=(si,sp) 到 end=(ei,ep) 的文本替换为 replacement。
+        - 所有中间 run 清空
+        - 文本写回到 si 的 run，保留 si 原有格式 => 新文本继承占位符格式
+        """
+        si, sp = start
+        ei, ep = end
+        start_run = p.runs[si]
+        end_run = p.runs[ei]
+
+        before = start_run.text[:sp]
+        after = end_run.text[ep:]
+
+        # 清空中间 run 的文本
+        for i in range(si + 1, ei + 1):
+            p.runs[i].text = ""
+
+        # 写回开始 run 的文本
+        start_run.text = before + replacement + after
+
+    while run_idx < len(p.runs):
+        run = p.runs[run_idx]
+        text = run.text
+        i = pos_in_run
+        while i < len(text):
+            ch = text[i]
+            if not inside:
+                if ch == "<":
+                    inside = True
+                    tag_start = (run_idx, i)  # 包含 '<'
+                    tag_buf = ["<"]
+                i += 1
+            else:
+                tag_buf.append(ch)
+                if ch == ">":
+                    raw_tag = "".join(tag_buf)
+                    m = ANGLE_TAG.fullmatch(raw_tag)
+                    repl = None
+                    if m:
+                        key = m.group(1).strip()
+                        repl = REPLACEMENTS.get(key)
+                    end_pos = (run_idx, i + 1)
+                    if repl is not None:
+                        collapse_replace(tag_start, end_pos, str(repl))
+                        # run 内容改变了，从开始 run 末尾继续
+                        run_idx = tag_start[0]
+                        pos_in_run = len(p.runs[run_idx].text)
+                        inside = False
+                        tag_start = None
+                        tag_buf = []
+                        break  # 重新处理这个 run
+                    else:
+                        # 未配置则保持原样
+                        inside = False
+                        tag_start = None
+                        tag_buf = []
+                i += 1
+        else:
+            run_idx += 1
+            pos_in_run = 0
+            continue
+        # 从 break 回来，继续 while 顶部
+
+def replace_in_table_preserve_format(table):
+    for row in table.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                replace_in_paragraph_preserve_format(p)
+            for t in cell.tables:
+                replace_in_table_preserve_format(t)
+
+def process_doc(path_in: str, path_out: str):
+    doc = Document(path_in)
+
+    # 正文
+    for p in doc.paragraphs:
+        replace_in_paragraph_preserve_format(p)
+    for t in doc.tables:
+        replace_in_table_preserve_format(t)
+
+    # 页眉/页脚
+    for sec in doc.sections:
+        for p in sec.header.paragraphs:
+            replace_in_paragraph_preserve_format(p)
+        for t in getattr(sec.header, "tables", []):
+            replace_in_table_preserve_format(t)
+
+        for p in sec.footer.paragraphs:
+            replace_in_paragraph_preserve_format(p)
+        for t in getattr(sec.footer, "tables", []):
+            replace_in_table_preserve_format(t)
+
+    doc.save(path_out)
+
+if __name__ == "__main__":
+    process_doc("template.docx", "output.docx")
